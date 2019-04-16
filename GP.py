@@ -1,10 +1,9 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import scipy.spatial
 
 
 class GP:
-    def __init__(self, n, mesh_size, num_funcs, lower_bound, upper_bound):
+    def __init__(self, n, kernel_name, mesh_size, num_funcs, lower_bound, upper_bound):
         '''
         :param n          :     The dimension of input data
         :param mesh_size  :     Specify the mesh size for each dimension
@@ -22,7 +21,10 @@ class GP:
         assert lower_bound.shape[0] == self.n, "The dimension of lower bound is incorrect."
         assert upper_bound.shape[0] == self.n, "The dimension of upper bound is incorrect."
         for i in range(self.n):
-            assert lower_bound[i] > upper_bound[i], 'The %i-th value of lower bound is bigger than uppers ' % int(i)
+            assert lower_bound[i] < upper_bound[i], 'The %i-th value of lower bound is bigger than uppers ' % int(i)
+        # Define the kernel function
+        if kernel_name == 'SE':
+            self.kernel_func = self.squared_exponential_kernel
         self.lb = lower_bound
         self.ub = upper_bound
         self.mesh_size = int(mesh_size)
@@ -30,24 +32,8 @@ class GP:
         # self.X stores the mesh grid points, n by (mesh_size + 1)^n matrix
         self.X = self.meshgrid_generator()
         # The priori distribution
-        self.mean = np.zeros(((mesh_size + 1) ** self.n, 1))
+        self.mean = np.zeros((mesh_size + 1) ** self.n)
         self.cov = self.squared_exponential_kernel(self.X, self.X)
-
-    def normalize_data(self, x):
-        assert x.ndim == 2, 'The input x should be a 2D matrix, each column stores 1 data point.'
-        data_range = self.ub - self.lb
-        normalized_x = np.zeros(x.shape)
-        for i in range(x.shape[1]):
-            normalized_x[:, i] = (x[:, i].reshape(-1, 1) - self.lb) / data_range
-        return normalized_x
-
-    def physical_data(self, x):
-        assert x.ndim == 2, 'The input x should be a 2D matrix, each column stores 1 data point.'
-        data_range = self.ub - self.lb
-        normalized_x = np.zeros(x.shape)
-        for i in range(x.shape[1]):
-            normalized_x[:, i] = x[:, i].reshape(-1, 1) * data_range + self.lb
-        return normalized_x
 
     def update(self, x, y):
         '''
@@ -60,7 +46,7 @@ class GP:
         assert x.shape[0] == self.n, 'The input x should be n-dimensional data.'
         assert y.ndim == 1, 'The input y should be a 1D vector, each column stores 1 value for each data point.'
         if self.xE.shape[1] == 0:
-            self.xE = np.copy(self.normalize_data(x))
+            self.xE = np.copy(x)
             self.yE = np.copy(y)
         else:
             self.xE = np.hstack((self.xE, x))
@@ -81,7 +67,7 @@ class GP:
         cov = np.zeros((m1, m2))
         for i in range(m1):
             diff = (X[:, i]).reshape(-1, 1) - Y
-            cov[i, :] = np.exp(-0.5 * np.diag(np.dot(diff, diff.T)))
+            cov[i, :] = np.exp(-0.5 * np.diag(np.dot(diff.T, diff)))
         return cov
 
     def meshgrid_generator(self):
@@ -101,7 +87,7 @@ class GP:
         '''
         arrs = []
         for i in range(self.n):
-            arrs.append(np.linspace(0, 1, self.mesh_size + 1))
+            arrs.append(np.linspace(self.lb[i], self.ub[i], self.mesh_size + 1))
         arrs = tuple(arrs)
 
         arrs = tuple(reversed(arrs))
@@ -128,51 +114,23 @@ class GP:
 
         return mesh_grid
 
-    def get_prior(self):
+    def posterior(self):
         '''
-        Generate the function values of prior distribution.
-        Usually this function aims for results display. As a result,
-        this function is only for 1D and 2D output.
-
-        For higher-dimensions, i.e. self.n > 2, it is easier to directly compute the posterior distribution.
-        :return:    The function values at mesh grid points.
+        Calculate the mean and covariance for posterior distribution matrix at X_test positions, given the observations
+        self.x and self.y.
+        :param X_test:      The test input, usually it is the mesh grid points of given n-dimensional parameter space.
+        :return:            The mean and covariance for posterior distribution
         '''
-        assert self.n > 2, "This prior is only for prior displaying, dimension n can not be more than 2."
+        cov_11 = self.kernel_func(self.xE, self.xE)
+        cov_12 = self.kernel_func(self.xE, self.X)
+        cov_22 = self.kernel_func(self.X, self.X)
+        # The transpose in the following line is a PUNCHLINE.
+        # The covariance for conditional distribution is Sigma12 * Sigma11^(-1).
+        cov12_cov11_inv = np.linalg.solve(cov_11, cov_12).T
+        self.mean = np.dot(cov12_cov11_inv, self.yE)
+        self.cov = cov_22 - np.dot(cov12_cov11_inv, cov_12)
 
-        # Generate the mesh grid points, stored as n by Mesh_size^n matrix.
-        X = self.meshgrid_generator()
-        # Generate kernelized covariance matrix
-        sigma = self.squared_exponential_kernel(X, X)
-
-        # Generate random functions on mesh grid points:
-
-        # Easier way using np.random.multivariate_normal:
-        # Notice that the mean for prior is all zeros for now.
-        # The shape o f Y would be (num_funcs) by (mesh_size + 1)^n matrix.
-        Y = np.random.multivariate_normal(mean=np.zeros(X.shape[1]), cov=sigma, size=self.num_funcs)
-
-        # # Self code way to generate Multivariate Gaussian distribution. Refer to Rasmussen & Williams Page-201.
-        # U, S, V = np.linalg.svd(sigma)
-        # # np.linalg.svd returns V.T as V
-        # # Sigma = U S V.T, and J = V S^1/2 V.T
-        # J = np.dot(V.T, np.dot(np.diag(np.sqrt(S)), V))
-        # # Notice that the mean for prior is all zeros for now.
-        # mean = np.zeros(X.shape[1]).reshape(-1, 1)
-        # std = np.random.multivariate_normal(mean=np.zeros(X.shape[1]),
-        #                                     cov=np.identity(X.shape[1]), size=self.num_funcs)
-        # Y = (mean + np.dot(J, std.T)).T
-        return mean, sigma
-
-        if self.n == 2:
-            prior_output = np.zeros((self.num_funcs, self.mesh_size + 1, self.mesh_size + 1))
-            for i in range(self.num_funcs):
-                prior_output[i, :, :] = Y[i, :].reshape(self.mesh_size + 1, self.mesh_size + 1)
-        else:  # n == 1
-            prior_output = np.copy(Y)
-
-        return prior_output
-
-    def visualizer_prior_1D(self):
+    def visualizer_1D(self):
         '''
         Generate the 1D plot of multivariate gaussian distribution, with the mean and covariance stored in self.mean
         and self.cov.
@@ -194,47 +152,58 @@ class GP:
 
         plt.figure()
         for i in range(self.num_funcs):
-            plt.scatter(self.X, Y[i, :])
-            plt.plot(self.X, Y[i, :])
+            plt.scatter(self.X, Y[i, :].reshape(-1, 1), marker='o', s=3, zorder=i)
+            plt.plot(self.X[0], Y[i, :])
         plt.grid()
         plt.xlabel('X')
         plt.ylabel('y = f(x)')
-        if self.xE.shape[1] != 0:
+        if self.xE.shape[1] > 0:
             # There is evaluated data, make the posterior plot
-            plt.scatter(self.xE.T[0], self.yE, marker='+', c='k')
+            plt.scatter(self.xE, self.yE.reshape(-1, 1), marker='+', c='k', s=50, zorder=self.num_funcs + 1)
         plt.show()
-        return
 
-    def visualizer_prior_2D(self, x, mean, cov):
+    def confidence_bound_1D(self):
+        plt.figure()
+        plt.plot(self.X[0], self.mean, c='b', label=r"$\mu$(x)", zorder=0)
+        plt.scatter(self.xE, self.yE.reshape(-1, 1), marker='+', c='k', s=50, zorder=5)
+        ucb = self.mean + 2 * np.diag(self.cov)
+        lcb = self.mean - 2 * np.diag(self.cov)
+        plt.fill_between(self.X[0], ucb, lcb, color='grey', alpha=0.5, label='Confidence Bound')
+        plt.grid()
+        plt.legend()
+        plt.show()
+
+    def visualizer_2D(self):
         x = np.linspace(0, 1, self.mesh_size + 1)
         y = np.linspace(0, 1, self.mesh_size + 1)
         X, Y = np.meshgrid(x, y)
-        prior_output = self.get_prior()
-        for i in range(self.num_funcs):
-            plt.figure()
-            plt.contourf(X, Y, prior_output[i, :, :])
-            plt.show()
-        return
+        MultiNormal = np.random.multivariate_normal(mean=self.mean, cov=self.cov, size=1)
+        Z = MultiNormal.reshape(self.mesh_size + 1, self.mesh_size + 1)
+        plt.figure()
+        plt.contourf(X, Y, Z)
+        plt.show()
 
-    def posterior(self, X_test):
-        '''
-        Calculate the mean and covariance for posterior distribution matrix at X_test positions, given the observations
-        self.x and self.y.
-        :param X_test:      The test input
-        :return:            The mean and covariance for posterior distribution
-        '''
-        # TODO fix training output and input
-        cov_11 = self.squared_exponential_kernel(self.x, self.x)
-        cov_12 = self.squared_exponential_kernel(self.x, X_test)
-        cov_22 = self.squared_exponential_kernel(X_test, X_test)
-        # The transpose in the following line is a PUNCHLINE.
-        # The covariance for conditional distribution is Sigma12 * Sigma11^(-1).
-        cov12_cov11_inv = np.linalg.solve(cov_11, cov_12).T
-        self.mean = np.dot(cov12_cov11_inv, self.y)
-        self.cov = cov_22 - np.dot(cov12_cov11_inv, cov_12)
-
-    def plot
 
 if __name__ == "__main__":
+    n = 1
+    MS = 50
+    Nfunc = 5
+    lb = -5 * np.ones((n, 1))
+    ub = 5 * np.ones((n, 1))
+
+    gp = GP(n, 'SE', MS, Nfunc, lb, ub)
+    # prior plot
+    gp.visualizer_1D()
+
+    # func = lambda x: - sum(np.multiply(500 * x, np.sin(np.sqrt(abs(500 * x))))) / 250
+    x = np.random.rand(1, 5) * 10 - 5
+    y = np.sin(x)[0]
+
+    # data samples
+    gp.update(x, y)
+    gp.posterior()
+    # posterior plot
+    gp.visualizer_1D()
+    gp.confidence_bound_1D()
 
 
