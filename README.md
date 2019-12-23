@@ -14,5 +14,6 @@ python3 1Dexample.py
 
 
 ## References
-Carl Edward Rasmussen and Christopher K. I. Williams. Gaussian Processes for Machine Learning.
+[1]Rasmussen CE and Williams CK (2006) Gaussian processes for machine learning. Cambridge MA: MIT Press.
 
+[2]Srinivas N, Krause A, Kakade SM and Seeger M (2012) Gaussian process optimization in the bandit setting: No regret and experimental design. IEEE Transactions on Information Theory 58(5): 3250–3265.
