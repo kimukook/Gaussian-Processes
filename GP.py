@@ -1,13 +1,16 @@
 import numpy as np
 import matplotlib.pyplot as plt
+# A perfect guide could be found at: https://peterroelants.github.io/posts/gaussian-process-tutorial/
+# Another perfect guidance: http://krasserm.github.io/2018/03/19/gaussian-processes/
 
 
-class GP:
-    def __init__(self, n, kernel_name, mesh_size, num_funcs, lower_bound, upper_bound):
+class GaussianProcessRegression:
+    def __init__(self, n, func, kernel_name, mesh_size, lower_bound, upper_bound, x=None, y=None):
         '''
         :param n          :     The dimension of input data
+        :param func       :     The objective function
+        :param kernal_name:     The name of the kernel function used to generate covariance matrix
         :param mesh_size  :     Specify the mesh size for each dimension
-        :param num_funcs  :     The number of prior distribution functions
         :param lower_bound:     The lower bound of n-dimensional input, n by 1
         :param upper_bound:     The upper bound of n-dimensional input, n by 1
         '''
@@ -27,13 +30,31 @@ class GP:
             self.kernel_func = self.squared_exponential_kernel
         self.lb = lower_bound
         self.ub = upper_bound
+        self.mesh_refine = 4
         self.mesh_size = int(mesh_size)
-        self.num_funcs = int(num_funcs)
+        self.max_iter = self.n * 20
+        self.beta = 5
+
+        self.func_eval = func
         # self.X stores the mesh grid points, n by (mesh_size + 1)^n matrix
         self.X = self.meshgrid_generator()
         # The priori distribution
         self.mean = np.zeros((mesh_size + 1) ** self.n)
         self.cov = self.squared_exponential_kernel(self.X, self.X)
+
+        # Initialize the evalauted data points.
+        # If it is not given, randomly select points within the bounds and evaluate those.
+        if x is None:
+            self.xE = self.lb + (self.ub - self.lb) * np.random.rand(self.n, 2)
+        else:
+            pass
+
+        if y is None:
+            self.yE = np.zeros(self.xE.shape[1])
+            for i in range(self.xE.shape[1]):
+                self.yE[i] = self.func_eval(self.xE[:, i])
+        else:
+            pass
 
     def update(self, x, y):
         '''
@@ -45,14 +66,10 @@ class GP:
         assert x.ndim == 2, 'The input x should be a 2D matrix, each column stores 1 data point.'
         assert x.shape[0] == self.n, 'The input x should be n-dimensional data.'
         assert y.ndim == 1, 'The input y should be a 1D vector, each column stores 1 value for each data point.'
-        if self.xE.shape[1] == 0:
-            self.xE = np.copy(x)
-            self.yE = np.copy(y)
-        else:
-            self.xE = np.hstack((self.xE, x))
-            self.yE = np.hstack((self.yE, y))
+        self.xE = np.hstack((self.xE, x))
+        self.yE = np.hstack((self.yE, y))
 
-    def squared_exponential_kernel(self, X, Y):
+    def squared_exponential_kernel(self, X, Y, l=1.0, sigma_f=1.0):
         '''
         K(x, x') = sigma_0^2 * exp[-1/2 * lambda * ||x-x'||^2]
         :param X: Could be matrix or vector, n by m1.
@@ -62,13 +79,8 @@ class GP:
         '''
         assert X.shape[0] == self.n, 'X should have the same size as n'
         assert Y.shape[0] == self.n, 'Y should have the same size as n'
-        m1 = X.shape[1]
-        m2 = Y.shape[1]
-        cov = np.zeros((m1, m2))
-        for i in range(m1):
-            diff = (X[:, i]).reshape(-1, 1) - Y
-            cov[i, :] = np.exp(-0.5 * np.diag(np.dot(diff.T, diff)))
-        return cov
+        sq_dist = np.sum(X**2, 0).reshape(-1, 1) + np.sum(Y**2, 0) - 2 * np.dot(X.T, Y)
+        return sigma_f**2 * np.exp(-1/(2*l**2) * sq_dist)
 
     def meshgrid_generator(self):
         '''
@@ -130,6 +142,26 @@ class GP:
         self.mean = np.dot(cov12_cov11_inv, self.yE)
         self.cov = cov_22 - np.dot(cov12_cov11_inv, cov_12)
 
+    def optimizer(self):
+        for kk in range(self.mesh_refine):
+            for k in range(self.max_iter):
+                self.posterior()
+                predictive_distribution = self.mean + self.beta * np.diag(self.cov)
+                x_iter_min = self.X[:, np.argmax(predictive_distribution)].reshape(-1, 1)
+                y_iter_min = self.func_eval(x_iter_min)
+
+                if np.min(np.linalg.norm(self.xE - x_iter_min, axis=0)) < 1e-6:
+                    print(f'The point {x_iter_min.T[0]} has already been found')
+                    if kk < self.mesh_refine - 1:
+                        print('Refine the mesh...\n')
+                        self.beta *= 2
+                        self.mesh_size *= 2
+                        self.X = self.meshgrid_generator()
+                    break
+                else:
+                    self.xE = np.hstack((self.xE, x_iter_min))
+                    self.yE = np.hstack((self.yE, y_iter_min))
+
     def visualizer_1D(self):
         '''
         Generate the 1D plot of multivariate gaussian distribution, with the mean and covariance stored in self.mean
@@ -138,7 +170,7 @@ class GP:
         The posterior distribution are updated
         :return:
         '''
-        Y = np.random.multivariate_normal(mean=self.mean, cov=self.cov, size=self.num_funcs)
+        Y = np.random.multivariate_normal(mean=self.mean, cov=self.cov, size=8)
 
         # # Self code way to generate Multivariate Gaussian distribution. Refer to Rasmussen & Williams Page-201.
         # U, S, V = np.linalg.svd(self.cov)
@@ -150,8 +182,8 @@ class GP:
         #                                     cov=np.identity(self.mesh_size + 1), size=self.num_funcs)
         # Y = (self.mean + np.dot(J, std.T)).T
 
-        plt.figure()
-        for i in range(self.num_funcs):
+        fig = plt.figure(figsize=[16, 9])
+        for i in range(8):
             plt.scatter(self.X, Y[i, :].reshape(-1, 1), marker='o', s=3, zorder=i)
             plt.plot(self.X[0], Y[i, :])
         plt.grid()
@@ -159,51 +191,49 @@ class GP:
         plt.ylabel('y = f(x)')
         if self.xE.shape[1] > 0:
             # There is evaluated data, make the posterior plot
-            plt.scatter(self.xE, self.yE.reshape(-1, 1), marker='+', c='k', s=50, zorder=self.num_funcs + 1)
+            plt.scatter(self.xE, self.yE.reshape(-1, 1), marker='+', c='k', s=50, zorder=8 + 1)
         plt.show()
 
     def confidence_bound_1D(self):
-        plt.figure()
+        fig = plt.figure(figsize=[16, 9])
+        # plot the objective
+        obj_x = np.arange(self.lb[0], self.ub[0]+0.02, 0.01).reshape(-1, 1).T
+        obj_y = np.zeros(obj_x.shape[1])
+        for i in range(obj_x.shape[1]):
+            obj_y[i] = self.func_eval(obj_x[:, i])
+        plt.plot(obj_x[0], obj_y, c='k', label=r'$f(x)$', zorder=0)
+        # plot the surrogate
         plt.plot(self.X[0], self.mean, c='b', label=r"$\mu$(x)", zorder=0)
-        plt.scatter(self.xE, self.yE.reshape(-1, 1), marker='+', c='k', s=50, zorder=5)
+        # plot the evaluated points
+        plt.scatter(self.xE, self.yE.reshape(-1, 1), marker='+', c='r', s=100, zorder=5, label=r'Evaluated points')
+        # plot the confidence bound
         ucb = self.mean + 2 * np.diag(self.cov)
         lcb = self.mean - 2 * np.diag(self.cov)
         plt.fill_between(self.X[0], ucb, lcb, color='grey', alpha=0.5, label='Confidence Bound')
         plt.grid()
         plt.legend()
         plt.show()
+        plt.close(fig)
 
     def visualizer_2D(self):
-        x = np.linspace(0, 1, self.mesh_size + 1)
-        y = np.linspace(0, 1, self.mesh_size + 1)
+        x = np.linspace(self.lb[0, 0], self.ub[0, 0], self.mesh_size + 1)
+        y = np.linspace(self.lb[1, 0], self.ub[1, 0], self.mesh_size + 1)
         X, Y = np.meshgrid(x, y)
         MultiNormal = np.random.multivariate_normal(mean=self.mean, cov=self.cov, size=1)
         Z = MultiNormal.reshape(self.mesh_size + 1, self.mesh_size + 1)
-        plt.figure()
-        plt.contourf(X, Y, Z)
+
+        plt.figure(figsize=[16, 9])
+        plt.contourf(X, Y, Z, cmap='gray')
+        plt.scatter(self.xE[0, :], self.xE[1, :], c='w', marker='s', s=70, edgecolors='k')
+        plt.grid()
         plt.show()
 
-
-if __name__ == "__main__":
-    n = 1
-    MS = 50
-    Nfunc = 5
-    lb = -5 * np.ones((n, 1))
-    ub = 5 * np.ones((n, 1))
-
-    gp = GP(n, 'SE', MS, Nfunc, lb, ub)
-    # prior plot
-    gp.visualizer_1D()
-
-    # func = lambda x: - sum(np.multiply(500 * x, np.sin(np.sqrt(abs(500 * x))))) / 250
-    x = np.random.rand(1, 5) * 10 - 5
-    y = np.sin(x)[0]
-
-    # data samples
-    gp.update(x, y)
-    gp.posterior()
-    # posterior plot
-    gp.visualizer_1D()
-    gp.confidence_bound_1D()
-
-
+        plt.figure(figsize=[16, 9])
+        for i in range(X.shape[0]):
+            for j in range(X.shape[1]):
+                point = np.vstack((X[i, j], Y[i, j]))
+                Z[i, j] = self.func_eval(point)
+        plt.contourf(X, Y, Z, cmap='gray')
+        plt.scatter(self.xE[0, :], self.xE[1, :], c='w', marker='s', s=70, edgecolors='k')
+        plt.grid()
+        plt.show()
